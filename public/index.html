@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Local BLAST by Yonatan Yerushalmy - Rachel Amir's group</title>
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+      .app-icon { font-size: 1.6em; line-height: 1; vertical-align: -.035em; }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-block">
+        <p class="eyebrow">Search local FASTA databases</p>
+        <h1>
+          <a class="app-title-link" href="https://github.com/Yo-yerush/Local_db_BLAST_app" target="_blank" rel="noopener noreferrer">
+            <span class="app-icon" aria-hidden="true">⎚</span>
+            <span>Local Database BLAST</span>
+          </a>
+        </h1>
+        <p class="app-credit">By Yonatan Yerushalmy &bull; Rachel Amir's group</p>
+      </div>
+      <div id="statusBadge" class="status-badge status-waiting">Checking BLAST</div>
+    </header>
+
+    <main id="workspace" class="workspace">
+      <section class="panel query-panel" aria-labelledby="queryTitle">
+        <div class="panel-header">
+          <h2 id="queryTitle">Query</h2>
+          <div class="header-actions">
+            <button id="exampleButton" class="secondary-button" type="button">DNA Example</button>
+            <button id="reloadButton" class="secondary-button" type="button">Reload CSV</button>
+          </div>
+        </div>
+
+        <form id="blastForm" class="form-grid">
+          <div class="field span-2">
+            <div class="field-heading">
+              <span>Target database</span>
+              <span id="targetCount" class="field-count">0 available</span>
+            </div>
+            <select id="targetSelect" class="native-hidden" aria-hidden="true" tabindex="-1"></select>
+            <div class="target-picker" aria-label="Target database picker">
+              <div class="target-tools">
+                <label class="search-field">
+                  <span>Search</span>
+                  <input id="targetSearch" type="search" placeholder="Search organism, assembly, file, category">
+                </label>
+                <label class="compact-field">
+                  <span>Set</span>
+                  <select id="targetGroupFilter"></select>
+                </label>
+                <label class="compact-field">
+                  <span>Type</span>
+                  <select id="targetTypeFilter"></select>
+                </label>
+                <label class="compact-field">
+                  <span>Kind</span>
+                  <select id="targetCategoryFilter"></select>
+                </label>
+              </div>
+              <div id="selectedTarget" class="selected-target"></div>
+              <div id="targetList" class="target-list" role="listbox" aria-label="Available BLAST targets"></div>
+            </div>
+          </div>
+
+          <fieldset class="mode-switch span-2">
+            <legend>Input</legend>
+            <label>
+              <input type="radio" name="queryMode" value="sequence" checked>
+              <span>Sequence</span>
+            </label>
+            <label>
+              <input type="radio" name="queryMode" value="id">
+              <span>Local ID</span>
+            </label>
+          </fieldset>
+
+          <label id="sourceField" class="field span-2 is-hidden">
+            <span>ID source database</span>
+            <select id="sourceSelect"></select>
+            <small class="field-help">Auto-find searches local FASTA headers for the ID, then BLASTs that sequence against the selected target.</small>
+          </label>
+
+          <label class="field span-2">
+            <span id="queryLabel">Sequence</span>
+            <textarea id="queryText" rows="9" spellcheck="false" placeholder=">query&#10;ATGGCG..."></textarea>
+          </label>
+
+          <label class="field">
+            <span>Program</span>
+            <select id="programSelect">
+              <option value="auto">Auto</option>
+              <option value="blastn">blastn</option>
+              <option value="blastp">blastp</option>
+              <option value="blastx">blastx</option>
+              <option value="tblastn">tblastn</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Query type</span>
+            <select id="queryTypeSelect">
+              <option value="auto">Auto</option>
+              <option value="nucl">Nucleotide</option>
+              <option value="prot">Protein</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>E-value</span>
+            <input id="evalueInput" type="text" value="auto" spellcheck="false">
+            <small class="field-help">Use auto for short pasted DNA. Type a number such as 1e-5 only when you want a fixed cutoff.</small>
+          </label>
+
+          <label class="field">
+            <span>Max hits</span>
+            <input id="maxTargetsInput" type="number" min="1" max="500" value="25">
+          </label>
+
+          <div class="actions span-2">
+            <button id="runButton" class="primary-button" type="submit">Run BLAST</button>
+            <button id="downloadButton" class="secondary-button" type="button" disabled>Download TSV</button>
+          </div>
+        </form>
+      </section>
+
+      <button
+        id="splitHandle"
+        class="split-handle"
+        type="button"
+        role="separator"
+        aria-orientation="vertical"
+        aria-valuemin="320"
+        aria-valuemax="860"
+        aria-label="Drag to resize query panel"
+        title="Drag to resize query panel"
+      >
+        <span></span>
+      </button>
+
+      <section class="panel results-panel" aria-labelledby="resultsTitle">
+        <div class="panel-header">
+          <div>
+            <h2 id="resultsTitle">Results</h2>
+            <p id="resultMeta" class="muted">No search has run.</p>
+          </div>
+          <label class="result-view-field">
+            <span>View</span>
+            <select id="resultViewSelect">
+              <option value="compact">Compact by target</option>
+              <option value="all">Show all hits</option>
+            </select>
+          </label>
+        </div>
+        <div id="message" class="message is-hidden"></div>
+        <div id="blastLoading" class="blast-loading is-hidden" role="status" aria-live="polite">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <div>
+            <strong>BLAST is running</strong>
+            <span>Building or reusing local databases, then searching the selected target.</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <div id="resultCount" class="result-count is-hidden"></div>
+          <table id="resultsTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="hitDialog" class="hit-dialog" aria-labelledby="hitDialogTitle">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">Hit details</p>
+            <h2 id="hitDialogTitle">Sequence and annotations</h2>
+          </div>
+          <button id="hitDialogClose" class="secondary-button" type="button">Close</button>
+        </header>
+        <div id="hitDetails" class="hit-details"></div>
+      </div>
+    </dialog>
+
+    <section class="database-strip" aria-labelledby="databaseTitle">
+      <div class="panel-header">
+        <div>
+          <h2 id="databaseTitle">Databases</h2>
+          <p id="databaseMeta" class="muted">Loading genome_sets/genomes.csv</p>
+        </div>
+      </div>
+      <div id="databaseList" class="database-list"></div>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

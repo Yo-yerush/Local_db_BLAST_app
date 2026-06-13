@@ -1,0 +1,13 @@
+{
+  "name": "local-blast-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local web app for running BLAST against FASTA files in the genomes folder.",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
