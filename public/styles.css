@@ -1048,6 +1048,65 @@ td {
   display: grid;
 }
 
+.annotation-groups {
+  display: grid;
+}
+
+.annotation-group {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.annotation-group:last-child {
+  border-bottom: 0;
+}
+
+.annotation-group summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 12px;
+  background: #f8f8f1;
+  cursor: pointer;
+  list-style: none;
+}
+
+.annotation-group summary::-webkit-details-marker {
+  display: none;
+}
+
+.annotation-group summary::before {
+  content: "+";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line-soft);
+  background: var(--surface-strong);
+  color: var(--accent-strong);
+  font-weight: 900;
+}
+
+.annotation-group[open] summary::before {
+  content: "-";
+}
+
+.annotation-group summary strong {
+  flex: 1 1 auto;
+  font-size: 13px;
+  text-transform: uppercase;
+}
+
+.annotation-group summary span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .annotation-item {
   display: grid;
   gap: 6px;
@@ -1079,6 +1138,11 @@ td {
 
 .annotation-item p {
   margin: 0;
+}
+
+.annotation-item p strong {
+  color: #30372f;
+  text-transform: none;
 }
 
 .annotation-meta {

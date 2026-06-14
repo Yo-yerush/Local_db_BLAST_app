@@ -1071,9 +1071,7 @@ function closeHitDialog() {
 }
 
 function renderHitDetails(detail, row) {
-  const annotationHtml = detail.annotations && detail.annotations.length
-    ? detail.annotations.map(renderAnnotation).join("")
-    : `<div class="detail-empty">No matching GFF/GTF annotations were found for this hit.</div>`;
+  const annotationHtml = renderAnnotationSections(detail.annotations || []);
   const title = detail.title || row.stitle || "";
   const database = detail.database || {};
   const sequenceNote = detail.sequence && detail.sequence.truncated ? "Context window shown" : "Full record shown";
@@ -1124,9 +1122,58 @@ function renderHitDetails(detail, row) {
         <h3>Annotations</h3>
         <span>${escapeHtml(detail.annotations ? `${detail.annotations.length} records` : "0 records")}</span>
       </div>
-      <div class="annotation-list">${annotationHtml}</div>
+      ${annotationHtml}
     </section>
   `;
+}
+
+function renderAnnotationSections(annotations) {
+  if (!annotations.length) {
+    return `<div class="detail-empty">No matching annotations were found for this hit.</div>`;
+  }
+
+  const geneDescriptions = annotations.filter(isGeneDescriptionAnnotation);
+  const gffAnnotations = annotations.filter((annotation) => !isGeneDescriptionAnnotation(annotation) && isGffAnnotation(annotation));
+  const otherAnnotations = annotations.filter((annotation) => (
+    !isGeneDescriptionAnnotation(annotation) && !isGffAnnotation(annotation)
+  ));
+
+  return `
+    <div class="annotation-groups">
+      ${renderAnnotationGroup("FASTA and other notes", otherAnnotations, "Header details, TE descriptions, and other supporting annotation records.", true)}
+      ${renderAnnotationGroup("Gene description", geneDescriptions, "Descriptions from matching gene description tables.")}
+      ${renderAnnotationGroup("GFF3 annotations", gffAnnotations, "Overlapping gene, transcript, CDS, exon, UTR, and related GFF/GTF features.")}
+    </div>
+  `;
+}
+
+function renderAnnotationGroup(title, annotations, emptyText, openByDefault = false) {
+  const count = annotations.length;
+  const content = count
+    ? `<div class="annotation-list">${annotations.map(renderAnnotation).join("")}</div>`
+    : `<div class="detail-empty compact">${escapeHtml(emptyText)}</div>`;
+  return `
+    <details class="annotation-group" ${openByDefault ? "open" : ""}>
+      <summary>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(`${count} record${count === 1 ? "" : "s"}`)}</span>
+      </summary>
+      ${content}
+    </details>
+  `;
+}
+
+function isGeneDescriptionAnnotation(annotation) {
+  return annotation.match === "description table"
+    || annotation.source === "Description table"
+    || annotation.feature === "gene_description";
+}
+
+function isGffAnnotation(annotation) {
+  const file = String(annotation.sourceFile || "");
+  return /\.(gff|gff3|gtf)(\.gz)?$/i.test(file)
+    || annotation.match === "coordinate"
+    || annotation.match === "attribute";
 }
 
 function renderAlignmentBlock(row) {
@@ -1221,23 +1268,62 @@ function detailItem(label, value) {
 }
 
 function renderAnnotation(annotation) {
-  const description = annotation.product || annotation.note || "";
+  const title = isGeneDescriptionAnnotation(annotation) ? "Gene description" : (annotation.feature || "feature");
+  const descriptionHtml = renderAnnotationDescription(annotation);
   return `
     <article class="annotation-item">
       <div>
-        <strong>${escapeHtml(annotation.feature || "feature")}</strong>
-        <span>${escapeHtml(annotation.seqid || "")}:${escapeHtml(annotation.start || "")}-${escapeHtml(annotation.end || "")} ${escapeHtml(annotation.strand || "")}</span>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(annotationLocation(annotation))}</span>
       </div>
       <div class="annotation-meta">
+        ${annotation.source ? `<span>${escapeHtml(annotation.source)}</span>` : ""}
         ${annotation.name ? `<span>${escapeHtml(annotation.name)}</span>` : ""}
         ${annotation.gene ? `<span>${escapeHtml(annotation.gene)}</span>` : ""}
         ${annotation.id ? `<span>${escapeHtml(annotation.id)}</span>` : ""}
         ${annotation.parent ? `<span>Parent ${escapeHtml(annotation.parent)}</span>` : ""}
         <span>${escapeHtml(annotation.sourceFile || "")}</span>
       </div>
-      ${description ? `<p>${escapeHtml(description)}</p>` : ""}
+      ${descriptionHtml}
     </article>
   `;
+}
+
+function annotationLocation(annotation) {
+  const start = annotation.start || "";
+  const end = annotation.end || "";
+  if (annotation.seqid && start && end) {
+    return `${annotation.seqid}:${start}-${end}${annotation.strand ? ` ${annotation.strand}` : ""}`;
+  }
+  return annotation.seqid || annotation.match || annotation.source || "";
+}
+
+function renderAnnotationDescription(annotation) {
+  const parts = [];
+  if (annotation.product) parts.push({ label: "Description", value: annotation.product });
+  if (annotation.note && annotation.note !== annotation.product) {
+    if (isGeneDescriptionAnnotation(annotation)) {
+      parts.push(...annotation.note.split(/\r?\n/).map(parseDescriptionLine));
+    } else {
+      parts.push({ label: "Details", value: annotation.note });
+    }
+  }
+  return parts.map((part) => `
+    <p>
+      <strong>${escapeHtml(part.label)}:</strong>
+      ${escapeHtml(part.value)}
+    </p>
+  `).join("");
+}
+
+function parseDescriptionLine(line) {
+  const text = String(line || "").trim();
+  const index = text.indexOf(":");
+  if (index === -1) return { label: "Details", value: text };
+  return {
+    label: text.slice(0, index).trim() || "Details",
+    value: text.slice(index + 1).trim()
+  };
 }
 
 function downloadTsv() {

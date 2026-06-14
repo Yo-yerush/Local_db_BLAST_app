@@ -38,7 +38,7 @@ const SHORT_NUCL_EVALUE = "1000";
 const HIT_DETAIL_FLANK = 120;
 const HIT_SEQUENCE_LIMIT = 12000;
 const ANNOTATION_LIMIT = 30;
-const ANNOTATION_INDEX_VERSION = 1;
+const ANNOTATION_INDEX_VERSION = 2;
 const ANNOTATION_BIN_SIZE = 100000;
 
 const OUT_FIELDS = [
@@ -71,6 +71,7 @@ const MIME_TYPES = new Map([
 
 const dbBuilds = new Map();
 const annotationIndexBuilds = new Map();
+const descriptionTableCaches = new Map();
 
 function resolveWorkDir() {
   if (process.env.LOCAL_BLAST_WORK_DIR) {
@@ -433,7 +434,40 @@ function collectAnnotationFiles(files, rootDir) {
   for (const [key, values] of grouped) {
     grouped.set(key, values.slice(0, 12));
   }
+  addSharedAnnotationSets(grouped);
   return grouped;
+}
+
+function addSharedAnnotationSets(grouped) {
+  const tair10 = (grouped.get("tair10") || []).filter(isSharedTair10Annotation);
+  if (!tair10.length) return;
+
+  mergeAnnotationSet(grouped, "tair10_blastsets", tair10);
+}
+
+function isSharedTair10Annotation(file) {
+  const type = String(file.type || "");
+  const name = String(file.file || file.name || "");
+  return /^(GFF|GTF|TE description|Description table)$/i.test(type)
+    || /\.(gff|gff3|gtf)(\.gz)?$/i.test(name)
+    || /description[_/.-]?file|methylome\.at_description/i.test(name);
+}
+
+function mergeAnnotationSet(grouped, targetKey, sharedFiles) {
+  const existing = grouped.get(targetKey) || [];
+  const merged = [...existing];
+  const seen = new Set(existing.map(annotationFileKey));
+  for (const file of sharedFiles) {
+    const key = annotationFileKey(file);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(file);
+  }
+  grouped.set(targetKey, merged.slice(0, 20));
+}
+
+function annotationFileKey(file) {
+  return normalizeKey(`${file.type || ""}:${file.file || file.name || ""}`);
 }
 
 async function isFastaCandidate(filePath) {
@@ -457,6 +491,7 @@ function classifyAnnotationFile(file) {
   if (/\.gtf(\.gz)?$/.test(lower)) return "GTF";
   if (/\.gbff|\.gbk/.test(lower)) return "GenBank";
   if (/sequence_report\.jsonl$/.test(lower)) return "NCBI sequence report";
+  if (/description[_/.-]?file|methylome\.at_description/.test(lower)) return "Description table";
   if (/transposable|transposon|(^|[_/.-])te([_/.-]|$)/.test(lower) && /\.txt(\.gz)?$/.test(lower)) return "TE description";
   if (/readme/i.test(lower)) return "README";
   return "Annotation";
@@ -1191,14 +1226,8 @@ async function getHitDetail(payload) {
   });
   const headerAnnotations = headerAnnotationForRecord(database, record);
   const teDescriptionAnnotations = await findTeDescriptionAnnotations(database, record, subjectId);
-  const gffAnnotations = shouldScanCoordinateAnnotations(database, record, subjectId)
-    ? await findHitAnnotations(database, {
-      subjectId,
-      header: record.header,
-      start: sequenceWindow.hit.from,
-      end: sequenceWindow.hit.to
-    }, { allowAttributeMatch: false })
-    : [];
+  const gffAnnotations = await findGffAnnotationsForRecord(database, record, subjectId, sequenceWindow);
+  const descriptionTableAnnotations = await findDescriptionTableAnnotations(database, record, subjectId, gffAnnotations);
 
   return {
     database: publicDatabase(database),
@@ -1209,9 +1238,30 @@ async function getHitDetail(payload) {
     hit: sequenceWindow.hit,
     sequence: sequenceWindow.sequence,
     orientedHitSequence: sequenceWindow.orientedHitSequence,
-    annotations: [...headerAnnotations, ...teDescriptionAnnotations, ...gffAnnotations].slice(0, ANNOTATION_LIMIT),
+    annotations: [...headerAnnotations, ...descriptionTableAnnotations, ...teDescriptionAnnotations, ...gffAnnotations].slice(0, ANNOTATION_LIMIT),
     annotationFiles: database.annotationFiles || []
   };
+}
+
+async function findGffAnnotationsForRecord(database, record, subjectId, sequenceWindow) {
+  if (shouldScanCoordinateAnnotations(database, record, subjectId)) {
+    return findHitAnnotations(database, {
+      subjectId,
+      header: record.header,
+      start: sequenceWindow.hit.from,
+      end: sequenceWindow.hit.to
+    }, { allowAttributeMatch: false });
+  }
+
+  const headerRange = genomicRangeFromFastaHeader(record.header);
+  if (!headerRange) return [];
+
+  return findHitAnnotations(database, {
+    subjectId: headerRange.seqid,
+    header: record.header,
+    start: headerRange.start,
+    end: headerRange.end
+  }, { allowAttributeMatch: false });
 }
 
 function parseCoordinate(value) {
@@ -1341,9 +1391,49 @@ function parseFastaHeaderAttributes(header) {
     const description = parts.find((part, index) => index > 0 && !/^Symbols:/i.test(part) && !/^(chr|chromosome|[A-Z]{1,3}_\d+)/i.test(part) && !/LENGTH=/i.test(part));
     if (description) attrs.description = description;
     const coordinate = parts.find((part) => /(FORWARD|REVERSE)/i.test(part));
-    if (coordinate) attrs.strand = /REVERSE/i.test(coordinate) ? "-" : "+";
+    if (coordinate) {
+      attrs.strand = /REVERSE/i.test(coordinate) ? "-" : "+";
+      const genomicRange = parseGenomicRangeText(coordinate);
+      if (genomicRange) {
+        attrs.seqid = genomicRange.seqid;
+        attrs.start = String(genomicRange.start);
+        attrs.end = String(genomicRange.end);
+      }
+    }
   }
   return attrs;
+}
+
+function genomicRangeFromFastaHeader(header) {
+  const attrs = parseFastaHeaderAttributes(header);
+  const start = Number.parseInt(attrs.start, 10);
+  const end = Number.parseInt(attrs.end, 10);
+  if (!attrs.seqid || !Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return {
+    seqid: attrs.seqid,
+    start: Math.min(start, end),
+    end: Math.max(start, end)
+  };
+}
+
+function parseGenomicRangeText(text) {
+  const match = String(text || "").match(/\b([A-Za-z][A-Za-z0-9_.-]*):(\d+)-(\d+)\b/);
+  if (!match) return null;
+  const start = Number.parseInt(match[2], 10);
+  const end = Number.parseInt(match[3], 10);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return {
+    seqid: normalizeHeaderSeqid(match[1]),
+    start,
+    end
+  };
+}
+
+function normalizeHeaderSeqid(seqid) {
+  const text = String(seqid || "");
+  const chrMatch = text.match(/^chr(?:omosome)?([0-9mc]+)$/i);
+  if (chrMatch) return `Chr${chrMatch[1].toUpperCase()}`;
+  return text;
 }
 
 async function findTeDescriptionAnnotations(database, record, subjectId) {
@@ -1408,6 +1498,180 @@ async function findTeDescriptionRow(filePath, aliases) {
     }
   }
   return null;
+}
+
+async function findDescriptionTableAnnotations(database, record, subjectId, gffAnnotations = []) {
+  const files = Array.isArray(database.annotationFiles) ? database.annotationFiles : [];
+  const descriptionFiles = files.filter((file) => (
+    /Description table/i.test(file.type || "")
+    || /description[_/.-]?file|methylome\.at_description/i.test(file.file || file.name || "")
+  ));
+  if (!descriptionFiles.length) return [];
+
+  const aliases = tairGeneAliases([subjectId, record.header, ...gffAnnotations.flatMap((annotation) => [
+    annotation.id,
+    annotation.parent,
+    annotation.name,
+    annotation.gene
+  ])]);
+  if (!aliases.length) return [];
+
+  for (const file of descriptionFiles) {
+    const resolved = resolveAnnotationPath(database, file);
+    if (!resolved) continue;
+    const row = await findDescriptionTableRow(resolved, aliases);
+    if (!row) continue;
+    return [descriptionTableAnnotation(file, resolved, row)];
+  }
+
+  return [];
+}
+
+async function findDescriptionTableRow(filePath, aliases) {
+  const table = await loadDescriptionTable(filePath);
+  for (const alias of aliases) {
+    const row = table.rowsById.get(alias);
+    if (row) return row;
+  }
+  return null;
+}
+
+async function loadDescriptionTable(filePath) {
+  const sourceStat = await fsp.stat(filePath);
+  const cached = descriptionTableCaches.get(filePath);
+  if (
+    cached &&
+    cached.sourceSize === sourceStat.size &&
+    cached.sourceMtimeMs === sourceStat.mtimeMs
+  ) {
+    return cached.table;
+  }
+
+  const table = await readDescriptionTable(filePath);
+  descriptionTableCaches.set(filePath, {
+    sourceSize: sourceStat.size,
+    sourceMtimeMs: sourceStat.mtimeMs,
+    table
+  });
+  return table;
+}
+
+async function readDescriptionTable(filePath) {
+  const rowsById = new Map();
+  let stream = fs.createReadStream(filePath);
+  if (/\.gz$/i.test(filePath)) stream = stream.pipe(zlib.createGunzip());
+  stream.setEncoding("utf8");
+
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let headers = null;
+  for await (const line of lines) {
+    if (!line.trim()) continue;
+    if (!headers) {
+      headers = parseCsvLine(line);
+      continue;
+    }
+    const values = parseCsvLine(line);
+    const row = {};
+    headers.forEach((header, index) => {
+      row[header] = (values[index] || "").trim();
+    });
+    const geneId = normalizeTairGeneId(row.gene_id || row.Gene_ID || row.id || row.ID);
+    if (geneId && !rowsById.has(geneId)) rowsById.set(geneId, row);
+  }
+  return { rowsById };
+}
+
+function parseCsvLine(line) {
+  const rows = parseCsv(`${line}\n`);
+  return rows.length ? Object.values(rows[0]) : splitCsvFallback(line);
+}
+
+function splitCsvFallback(line) {
+  const values = [];
+  let value = "";
+  let quoted = false;
+  for (let index = 0; index < String(line || "").length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      value += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      values.push(value);
+      value = "";
+    } else {
+      value += char;
+    }
+  }
+  values.push(value);
+  return values;
+}
+
+function descriptionTableAnnotation(file, filePath, row) {
+  const geneId = row.gene_id || row.Gene_ID || row.id || "";
+  const symbol = usefulDescriptionValue(row.Symbol);
+  const shortDescription = usefulDescriptionValue(row.Short_description);
+  const geneDescription = usefulDescriptionValue(row.Gene_description);
+  const computationalDescription = usefulDescriptionValue(row.Computational_description);
+  const product = shortDescription || geneDescription || computationalDescription || "";
+  return {
+    sourceFile: file.file || file.name || path.basename(filePath),
+    seqid: geneId,
+    source: "Description table",
+    feature: "gene_description",
+    start: "",
+    end: "",
+    strand: "",
+    phase: "",
+    id: geneId,
+    name: symbol,
+    gene: symbol,
+    product: truncateText(product, 420),
+    note: descriptionTableNote(row),
+    parent: "",
+    match: "description table"
+  };
+}
+
+function descriptionTableNote(row) {
+  return Object.entries(row)
+    .map(([label, value]) => [formatDescriptionColumnName(label), usefulDescriptionValue(value)])
+    .filter(([, value]) => value)
+    .map(([label, value]) => `${label}: ${value}`)
+    .join("\n");
+}
+
+function formatDescriptionColumnName(name) {
+  return String(name || "")
+    .replace(/[._]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function usefulDescriptionValue(value) {
+  const text = String(value || "").trim();
+  if (!isUsefulAttributeValue(text)) return "";
+  return text.replace(/%2C/g, ",");
+}
+
+function tairGeneAliases(values) {
+  const aliases = new Set();
+  for (const value of values) {
+    for (const variant of idVariants(value)) {
+      const normalized = normalizeTairGeneId(variant);
+      if (normalized) aliases.add(normalized);
+    }
+  }
+  return [...aliases];
+}
+
+function normalizeTairGeneId(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/\b(AT[1-5MC](?:G\d{5}|TE\d+))(?:\.\d+)?\b/i);
+  return match ? match[1].toUpperCase() : "";
 }
 
 function parseBooleanText(value) {
@@ -1761,9 +2025,15 @@ function decodeAttributeValue(value) {
 
 function firstAttribute(attributes, names) {
   for (const name of names) {
-    if (attributes[name]) return truncateText(attributes[name], 180);
+    if (!isUsefulAttributeValue(attributes[name])) continue;
+    return truncateText(attributes[name], 180);
   }
   return "";
+}
+
+function isUsefulAttributeValue(value) {
+  const text = String(value || "").trim();
+  return Boolean(text) && !/^(none|null|na|n\/a|\.)$/i.test(text);
 }
 
 function annotationAttributesMatch(attributes, subjectAliases) {
@@ -1809,7 +2079,7 @@ function idVariants(value) {
   for (const token of text.split(/[\s|,;:\[\]()]+/)) {
     add(token);
   }
-  const tairMatch = text.match(/AT[1-5MC]G\d{5}(?:\.\d+)?/ig);
+  const tairMatch = text.match(/AT[1-5MC](?:G\d{5}|TE\d+)(?:\.\d+)?/ig);
   if (tairMatch) tairMatch.forEach(add);
   const ncbiMatch = text.match(/[A-Z]{1,3}_\d+(?:\.\d+)?/g);
   if (ncbiMatch) ncbiMatch.forEach(add);
